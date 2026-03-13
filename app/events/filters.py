@@ -13,10 +13,11 @@ from app.db.models import Event
 logger = logging.getLogger(__name__)
 
 # Mapping from onboarding area IDs to boroughs/districts
+# Maps onboarding area IDs → values to match against district, borough, AND city columns
 AREA_TO_DISTRICTS = {
-    "manhattan_upper": ["Upper West Side", "Upper East Side", "Harlem", "Washington Heights"],
-    "manhattan_mid": ["Midtown", "Chelsea", "Flatiron", "Gramercy", "Murray Hill"],
-    "manhattan_lower": ["Village", "FiDi", "Lower East Side", "SoHo", "TriBeCa", "Chinatown"],
+    "manhattan_upper": ["Upper West Side", "Upper East Side", "Harlem", "Washington Heights", "Manhattan"],
+    "manhattan_mid": ["Midtown", "Chelsea", "Flatiron", "Gramercy", "Murray Hill", "Manhattan"],
+    "manhattan_lower": ["Village", "FiDi", "Lower East Side", "SoHo", "TriBeCa", "Chinatown", "Manhattan"],
     "brooklyn": ["Brooklyn"],
     "queens": ["Queens"],
     "bronx": ["Bronx", "The Bronx"],
@@ -24,10 +25,15 @@ AREA_TO_DISTRICTS = {
     "anywhere": [],
 }
 
+# "New York" in city column typically means Manhattan
+NYC_CITY_ALIASES = {"New York", "New York City", "NYC"}
+
 BUDGET_TO_CENTS = {
     "free": 0,
     "under_25": 2500,
     "under_50": 5000,
+    "under_75": 7500,
+    "under_100": 10000,
     "any": None,
 }
 
@@ -113,23 +119,28 @@ async def filter_events(db: AsyncSession, criteria: FilterCriteria) -> list[dict
 
     # Area filter
     if criteria.areas and "anywhere" not in criteria.areas:
-        area_districts = []
-        area_boroughs = []
+        area_values = set()
+        has_manhattan = False
         for area_id in criteria.areas:
+            if area_id.startswith("manhattan"):
+                has_manhattan = True
             districts = AREA_TO_DISTRICTS.get(area_id, [])
             if districts:
-                area_districts.extend(districts)
-                area_boroughs.extend(districts)
+                area_values.update(districts)
             else:
-                # Free text area
-                area_districts.append(area_id)
+                area_values.add(area_id)
 
-        if area_districts:
-            # Match on district, borough, or city
+        # If any Manhattan area is selected, also match "New York" in city
+        # (most Manhattan events have city="New York" with empty district/borough)
+        city_matches = set(area_values)
+        if has_manhattan:
+            city_matches.update(NYC_CITY_ALIASES)
+
+        if area_values:
             query = query.where(
-                Event.district.in_(area_districts)
-                | Event.borough.in_(area_boroughs)
-                | Event.city.in_(area_districts)
+                Event.district.in_(area_values)
+                | Event.borough.in_(area_values)
+                | Event.city.in_(city_matches)
             )
 
     # Category filter (soft: only if specified)
@@ -191,4 +202,5 @@ def _event_to_dict(event: Event) -> dict:
         "reviews_json": event.reviews_json,
         "includes_json": event.includes_json,
         "is_family_friendly": event.is_family_friendly,
+        "derisk_json": event.derisk_json,
     }

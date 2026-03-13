@@ -1,7 +1,8 @@
 """CSV import/re-import pipeline for events.
 
-Designed for the specific CSV format from the PulseUP scraper with
-nested JSON in the `search_stats` column containing enriched event and venue data.
+Supports two CSV formats:
+1. Legacy format: nested JSON in `search_stats` column, `event_name` field
+2. New format: top-level columns (title, next_start_at, etc.) with `data` JSON column
 """
 
 from __future__ import annotations
@@ -49,6 +50,8 @@ def _safe_str(value, default=None):
     if value is None:
         return default
     if isinstance(value, str):
+        if value.strip() == "":
+            return default
         return value
     if isinstance(value, (dict, list)):
         return json.dumps(value)
@@ -70,6 +73,8 @@ def _safe_bool(value, default=None):
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
+        if value.strip() == "":
+            return default
         return value.lower() in ("true", "1", "yes")
     return bool(value)
 
@@ -78,13 +83,32 @@ def _price_to_cents(price_value) -> int | None:
     """Convert price value to cents."""
     if price_value is None:
         return None
+    if isinstance(price_value, str):
+        price_value = price_value.strip()
+        if price_value == "":
+            return None
+        try:
+            price_value = float(price_value)
+        except (ValueError, TypeError):
+            return None
     if isinstance(price_value, (int, float)):
-        return int(price_value * 100)
+        return int(round(price_value * 100))
     return None
 
 
+def _safe_literal_eval(value: str | None) -> list | dict | None:
+    """Parse Python literal strings like \"['a', 'b']\" into actual objects."""
+    if not value or value.strip() in ("", "None", "null", "[]", "{}"):
+        return None
+    try:
+        result = ast.literal_eval(value)
+        return result
+    except (ValueError, SyntaxError):
+        return None
+
+
 def _extract_image_url(images_raw: str | None, merge_data: dict | None) -> str | None:
-    """Extract the best image URL from available data."""
+    """Extract the best image URL from available data (legacy format)."""
     # Try merge data first (usually higher quality)
     if merge_data:
         event_data = merge_data.get("event", {})
@@ -107,12 +131,163 @@ def _extract_image_url(images_raw: str | None, merge_data: dict | None) -> str |
     return None
 
 
-def _parse_row(row: dict, source_csv: str) -> dict:
-    """Parse a CSV row into Event model fields.
+def _parse_row_new(row: dict, source_csv: str) -> dict:
+    """Parse a NEW-format CSV row (top-level columns, `data` JSON) into Event model fields."""
 
-    Extracts data from both top-level columns and the nested
-    `search_stats` JSON column which contains enriched data.
-    """
+    # Parse the `data` JSON column for nested venue/event info
+    data = _safe_json_parse(row.get("data")) or {}
+
+    # Parse source_urls for ticket URL
+    source_urls = _safe_json_parse(row.get("source_urls")) or {}
+    ticket_url = ""
+    if isinstance(source_urls, dict):
+        ticket_url = source_urls.get("ticket", "")
+
+    # Also check data for ticket_url
+    if not ticket_url:
+        ticket_url = data.get("ticket_url", "")
+
+    # External ID
+    external_id = (
+        row.get("external_id")
+        or row.get("slug")
+        or row.get("canonical_url")
+        or str(row.get("id", ""))
+    )
+
+    # Date/time extraction from ISO timestamps like "2026-04-04T00:00:00+00:00"
+    start_at = row.get("next_start_at", "") or ""
+    end_at = row.get("next_end_at", "") or ""
+
+    start_date = start_at[:10] if len(start_at) >= 10 else None
+    start_time = start_at[11:19] if len(start_at) >= 19 else ""
+    end_date = end_at[:10] if len(end_at) >= 10 else None
+    end_time = end_at[11:19] if len(end_at) >= 19 else ""
+
+    # Price handling
+    is_free = _safe_bool(row.get("is_free"))
+    price_min_cents = _price_to_cents(row.get("price_min"))
+    price_max_cents = _price_to_cents(row.get("price_max"))
+    price_display = _safe_str(row.get("price_summary"), "")
+
+    # Use price_min as the main price_cents
+    price_cents = price_min_cents
+    if is_free:
+        price_cents = 0
+
+    if not price_display:
+        if is_free:
+            price_display = "Free"
+        elif price_cents is not None:
+            price_display = f"${price_cents / 100:.0f}"
+
+    # Tags - Python list string like "['tag1', 'tag2']"
+    tags = _safe_literal_eval(row.get("tags")) or []
+
+    # Reviews - Python list string
+    reviews = _safe_literal_eval(row.get("reviews")) or []
+
+    # Images - Python list of dicts like [{'image': 'url'}]
+    images_parsed = _safe_literal_eval(row.get("images")) or []
+    images_json = []
+    if isinstance(images_parsed, list):
+        for img in images_parsed:
+            if isinstance(img, dict):
+                url = img.get("image") or img.get("url")
+                if url:
+                    images_json.append(url)
+            elif isinstance(img, str):
+                images_json.append(img)
+
+    # Main image: prefer picture_url, fallback to first from images
+    main_image_url = _safe_str(row.get("picture_url"))
+    if not main_image_url and images_json:
+        main_image_url = images_json[0]
+
+    # Borough/district: use city_district
+    city_district = _safe_str(row.get("city_district"), "")
+    district = city_district
+    borough = city_district
+
+    # Includes from data
+    includes = data.get("includes", [])
+
+    # is_family_friendly: infer from category or data
+    is_family_friendly = data.get("is_family_friendly")
+    if is_family_friendly is None:
+        cat = _safe_str(row.get("category_l1"), "").lower()
+        if cat == "family":
+            is_family_friendly = True
+
+    return {
+        "external_id": str(external_id),
+        "source_name": _safe_str(row.get("source"), ""),
+        "title": _safe_str(row.get("title"), "Untitled"),
+        "short_title": _safe_str(row.get("short_title")),
+        "description": _safe_str(row.get("description"), ""),
+        "description_source": _safe_str(row.get("description_source"), ""),
+        "tagline": _safe_str(row.get("tagline")),
+        "category": _safe_str(row.get("category_l1"), ""),
+        "tags_json": tags,
+        "url": _safe_str(row.get("canonical_url"), ""),
+        "ticket_url": _safe_str(ticket_url, ""),
+        # Dates
+        "start_date": _safe_str(start_date),
+        "end_date": _safe_str(end_date),
+        "start_time": _safe_str(start_time, ""),
+        "end_time": _safe_str(end_time, ""),
+        "duration_minutes": _safe_int(data.get("duration_minutes")),
+        "timezone": _safe_str(row.get("timezone"), ""),
+        "schedule_raw": _safe_str(row.get("schedule"), ""),
+        # Location
+        "venue_name": _safe_str(row.get("venue_name"), ""),
+        "venue_address": _safe_str(row.get("address"), ""),
+        "city": _safe_str(row.get("city"), ""),
+        "district": district,
+        "borough": borough,
+        "state": _safe_str(row.get("country_state"), ""),
+        "zip_code": _safe_str(row.get("zip_code"), ""),
+        "latitude": _safe_float(row.get("lat")),
+        "longitude": _safe_float(row.get("lon")),
+        # Age
+        "age_min": _safe_int(row.get("age_min")),
+        "age_max": _safe_int(row.get("age_best_to")),
+        "age_best_min": _safe_int(row.get("age_best_from")),
+        "age_best_max": _safe_int(row.get("age_best_to")),
+        # Price
+        "is_free": is_free,
+        "price_cents": price_cents,
+        "price_min_cents": price_min_cents,
+        "price_max_cents": price_max_cents,
+        "price_display": _safe_str(price_display),
+        # Media
+        "main_image_url": _safe_str(main_image_url),
+        "images_json": images_json,
+        # Venue details from data
+        "venue_type": _safe_str(data.get("venue_venue_type")),
+        "stroller_friendly": _safe_bool(data.get("venue_stroller_friendly")),
+        "wheelchair_accessible": _safe_bool(data.get("venue_wheelchair_accessible")),
+        "accessibility_notes": _safe_str(data.get("venue_accessibility_notes")),
+        "venue_phone": _safe_str(data.get("venue_phone")),
+        "venue_website": _safe_str(data.get("venue_website")),
+        # Reviews
+        "rating_avg": _safe_float(row.get("rating_avg")),
+        "rating_count": _safe_int(row.get("rating_count")),
+        "reviews_json": reviews,
+        # Extra
+        "includes_json": includes,
+        "is_family_friendly": _safe_bool(is_family_friendly),
+        "subway_info": _safe_str(row.get("subway")),
+        "derisk_json": _safe_json_parse(row.get("derisk")),
+        # Import tracking
+        "source_csv": source_csv,
+        "is_active": True,
+    }
+
+
+def _parse_row_legacy(row: dict, source_csv: str) -> dict:
+    """Parse a LEGACY CSV row (search_stats JSON, event_name field) into Event model fields."""
+
     # Parse the enriched data from search_stats
     merge_data = None
     search_stats = _safe_json_parse(row.get("search_stats"))
@@ -221,6 +396,19 @@ def _parse_row(row: dict, source_csv: str) -> dict:
         "source_csv": source_csv,
         "is_active": True,
     }
+
+
+def _parse_row(row: dict, source_csv: str) -> dict:
+    """Parse a CSV row into Event model fields.
+
+    Auto-detects format:
+    - If row has 'title' column -> new format (top-level columns with `data` JSON)
+    - If row has 'event_name' column -> legacy format (search_stats JSON)
+    """
+    if "title" in row:
+        return _parse_row_new(row, source_csv)
+    else:
+        return _parse_row_legacy(row, source_csv)
 
 
 async def import_csv(

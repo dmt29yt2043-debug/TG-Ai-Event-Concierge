@@ -154,6 +154,7 @@ class Event(Base):
     includes_json: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     is_family_friendly: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
     subway_info: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    derisk_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     # Import tracking
     source_csv: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
@@ -162,3 +163,15 @@ class Event(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()
     )
+
+
+class EventRating(Base):
+    __tablename__ = "event_ratings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(Integer, ForeignKey("users.id"), nullable=False)
+    event_external_id: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
+    event_title: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
+    rating: Mapped[int] = mapped_column(Integer, nullable=False)  # 1-5
+    search_query: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

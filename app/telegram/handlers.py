@@ -76,6 +76,7 @@ async def on_callback(callback: CallbackQuery) -> None:
         type="callback",
         callback_data=callback.data,
         callback_text=callback.data,
+        callback_message_id=callback.message.message_id,
     )
     await _process(tg_msg)
 

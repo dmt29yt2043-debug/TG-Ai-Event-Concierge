@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import select
+from sqlalchemy.orm.attributes import flag_modified
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import MessageLog, Session, User, UserProfile
+from app.db.models import EventRating, MessageLog, Session, User, UserProfile
 
 
 async def get_or_create_user(db: AsyncSession, tg_id: str) -> User:
@@ -48,6 +49,7 @@ async def update_session_state(
     session.state = new_state
     if payload is not None:
         session.state_payload_json = payload
+        flag_modified(session, "state_payload_json")
     session.last_user_message_at = datetime.now(timezone.utc)
     await db.flush()
 
@@ -60,6 +62,18 @@ async def get_or_create_profile(db: AsyncSession, user_id: int) -> UserProfile:
         db.add(profile)
         await db.flush()
     return profile
+
+
+async def reset_profile(db: AsyncSession, user_id: int) -> None:
+    """Wipe all user profile data for a clean restart."""
+    profile = await get_or_create_profile(db, user_id)
+    profile.children_json = None
+    profile.interests_json = None
+    profile.neighborhoods_json = None
+    profile.budget_preference = None
+    profile.special_needs_notes = None
+    profile.onboarding_complete = False
+    await db.flush()
 
 
 async def save_message(
@@ -89,3 +103,23 @@ async def message_already_processed(db: AsyncSession, tg_message_id: str) -> boo
         select(MessageLog.id).where(MessageLog.tg_message_id == tg_message_id).limit(1)
     )
     return result.scalar_one_or_none() is not None
+
+
+async def save_event_rating(
+    db: AsyncSession,
+    user_id: int,
+    event_external_id: str,
+    event_title: str | None,
+    rating: int,
+    search_query: str | None = None,
+) -> EventRating:
+    """Save a user's 1-5 star rating for a recommended event."""
+    entry = EventRating(
+        user_id=user_id,
+        event_external_id=event_external_id,
+        event_title=event_title,
+        rating=rating,
+        search_query=search_query,
+    )
+    db.add(entry)
+    return entry

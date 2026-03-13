@@ -51,6 +51,42 @@ async def dispatch(
 
     logger.info(f"Dispatching: user={user.tg_id} state={state} msg_type={msg.type}")
 
+    # ---- Universal voice transcription ----
+    # If the message is a voice note, transcribe it before passing to handler.
+    # Skip for states that already handle transcription internally (READY, ASK_DAY, Q5)
+    # or if state is TRANSCRIBING (avoid loops).
+    _SKIP_AUTO_TRANSCRIBE = {
+        State.TRANSCRIBING,
+        State.READY,
+        State.ASK_DAY,
+        State.Q5_PREFERENCES,
+    }
+    if (
+        msg.type == "audio"
+        and msg.audio_file_id
+        and state not in _SKIP_AUTO_TRANSCRIBE
+        and text is None
+    ):
+        from app.stt.transcribe import transcribe_voice_note
+
+        await client.send_text(user.tg_id, "\U0001f399\ufe0f Transcribing your voice note...")
+        try:
+            transcript = await transcribe_voice_note(client, msg.audio_file_id)
+        except Exception:
+            logger.exception("Voice transcription failed")
+            transcript = None
+
+        if transcript:
+            text = transcript
+            await client.send_text(user.tg_id, f'I heard: "{transcript}"')
+            logger.info(f"Auto-transcribed voice to: {transcript[:80]}")
+        else:
+            await client.send_text(
+                user.tg_id,
+                "Sorry, I couldn\u2019t understand that voice note. Could you try typing instead?",
+            )
+            return
+
     try:
         await handler(
             session=session,

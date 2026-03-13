@@ -20,3 +20,4 @@ class TelegramMessage:
     callback_data: str | None = None  # inline keyboard button ID
     callback_text: str | None = None  # inline keyboard button display text
     audio_file_id: str | None = None  # Telegram file_id for voice
+    callback_message_id: int | None = None  # message_id of the message with inline keyboard

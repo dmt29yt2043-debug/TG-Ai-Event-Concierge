@@ -18,7 +18,7 @@ CRITICAL RULES:
 
 Your task:
 - Review the list of candidate events
-- Rank the top 3 events that best match the user's profile and request
+- Rank the top 5 events that best match the user's profile and request
 - For each event, explain WHY it's a good fit in 1-2 sentences
 
 Return JSON with:
@@ -77,6 +77,33 @@ def _event_to_summary(event: dict) -> str:
     return " | ".join(parts)
 
 
+def _format_children_for_llm(children_json: dict | None) -> str:
+    """Format children_json into a human-readable string for the LLM prompt."""
+    children = (children_json or {}).get("children", [])
+    if not children:
+        return "  No children info provided"
+    lines = []
+    for i, c in enumerate(children):
+        age = c.get("age", "?")
+        gender = c.get("gender", "")
+        name = c.get("name", "")
+        interests = c.get("interests", [])
+        notes = c.get("notes", [])
+        parts = []
+        label = f"{age}yo"
+        if gender and gender != "unknown":
+            label += f" {gender}"
+        if name:
+            label += f" ({name})"
+        parts.append(label)
+        if interests:
+            parts.append(f"enjoys: {', '.join(interests)}")
+        if notes:
+            parts.append(f"parent notes: {', '.join(notes)}")
+        lines.append(f"  - Child {i + 1}: {' — '.join(parts)}")
+    return "\n".join(lines)
+
+
 async def rank_events(
     candidates: list[dict],
     user_profile: dict,
@@ -100,8 +127,12 @@ async def rank_events(
         f"Event {i + 1}:\n{_event_to_summary(e)}" for i, e in enumerate(candidates)
     )
 
+    # Format children data readably for the LLM
+    children_text = _format_children_for_llm(user_profile.get("children_json"))
+
     user_prompt = f"""User profile:
-- Children: {json.dumps(user_profile.get('children_json', {}))}
+- Children:
+{children_text}
 - Interests: {json.dumps(user_profile.get('interests_json', []))}
 - Area preference: {json.dumps(user_profile.get('neighborhoods_json', []))}
 - Budget: {user_profile.get('budget_preference', 'any')}
